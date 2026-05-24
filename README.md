@@ -1,3 +1,13 @@
+# FORK
+
+For this fork I just fixed problems that I had, they include:
+1. Incorrect scaling
+2. Incorrect screenshot size
+3. Automatic choosing of current active monitor
+4. Ability to zoom out further
+
+I'm too lazy to structure code in a good enough way for PR so this changes will live here, I'm sorry.
+
 # Woomer - Boomer but for wayland
 
 Zoomer application for wayland (linux) inspired by [tsoding's boomer](https://github.com/tsoding/boomer) written in rust

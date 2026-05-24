@@ -1,8 +1,11 @@
 use std::{env, process};
 
-use libwayshot::WayshotConnection;
+use libwayshot::{output::OutputInfo, WayshotConnection};
 use raylib::{
-    ffi::{Image as FfiImage, SetWindowMonitor, ToggleFullscreen},
+    ffi::{
+        rlViewport, ConfigFlags, Image as FfiImage, SetConfigFlags, SetWindowMonitor,
+        ToggleFullscreen,
+    },
     prelude::*,
 };
 const SPOTLIGHT_TINT: Color = Color::new(0x00, 0x00, 0x00, 190);
@@ -32,6 +35,13 @@ fn main() {
         process::exit(1);
     }
 
+    let conn = WayshotConnection::new().unwrap();
+    let outputs = conn.get_all_outputs();
+    let (cx, cy) = cursor_pos().expect("cursor pos");
+    let active = output_at(outputs, cx, cy).unwrap_or(&outputs[0]);
+    println!("active monitor: {}", active.name);
+    monitor_name = Some(active.name.clone());
+
     let selected_output = match monitor_name {
         None => &outputs[0],
         Some(ref name) => outputs
@@ -44,10 +54,13 @@ fn main() {
     };
 
     let screenshot_image = wayshot_connection
-        .screenshot_all(false)
+        .screenshot_single_output(selected_output, false)
         .expect("failed to take a screenshot")
         .to_rgba8();
     let (width, height) = screenshot_image.dimensions();
+    unsafe {
+        SetConfigFlags(ConfigFlags::FLAG_WINDOW_HIGHDPI as u32);
+    }
     let (mut rl, thread) = raylib::init()
         .title(env!("CARGO_BIN_NAME"))
         .size(
@@ -110,10 +123,7 @@ fn main() {
         rl.load_shader_from_memory(&thread, None, Some(include_str!("../shaders/spotlight.fs")));
     let mut rl_camera = Camera2D::default();
     rl_camera.zoom = 1.0;
-    rl_camera.target = Vector2::new(
-        selected_output.logical_region.inner.position.x as f32,
-        selected_output.logical_region.inner.position.y as f32,
-    );
+    rl_camera.target = Vector2::new(0.0, 0.0);
 
     let mut delta_scale = 0f64;
     let mut scale_pivot = rl.get_mouse_position();
@@ -158,8 +168,8 @@ fn main() {
             spotlight_radius_multiplier_uniform_location =
                 spotlight_shader.get_shader_location("spotlightRadiusMultiplier");
         }
-        let enable_spotlight =
-            rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL) || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL);
+        let enable_spotlight = rl.is_key_down(KeyboardKey::KEY_LEFT_CONTROL)
+            || rl.is_key_down(KeyboardKey::KEY_RIGHT_CONTROL);
         let scrolled_amount = rl.get_mouse_wheel_move_v().y;
         if rl.is_key_pressed(KeyboardKey::KEY_LEFT_CONTROL)
             || rl.is_key_pressed(KeyboardKey::KEY_RIGHT_CONTROL)
@@ -170,7 +180,8 @@ fn main() {
         if scrolled_amount != 0.0 {
             match (
                 enable_spotlight,
-                rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT) || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT),
+                rl.is_key_down(KeyboardKey::KEY_LEFT_SHIFT)
+                    || rl.is_key_down(KeyboardKey::KEY_RIGHT_SHIFT),
             ) {
                 (_, false) => {
                     delta_scale += scrolled_amount as f64;
@@ -185,7 +196,7 @@ fn main() {
         if delta_scale.abs() > 0.5 {
             let p0 = scale_pivot / rl_camera.zoom;
             rl_camera.zoom = (rl_camera.zoom as f64 + delta_scale * rl.get_frame_time() as f64)
-                .clamp(1.0, 10.) as f32;
+                .clamp(0.1, 10.) as f32;
             let p1 = scale_pivot / rl_camera.zoom;
             rl_camera.target += p0 - p1;
             delta_scale -= delta_scale * rl.get_frame_time() as f64 * 4.0
@@ -207,11 +218,16 @@ fn main() {
             velocity -= velocity * rl.get_frame_time() * 6.0;
         }
 
+        let texture_scale = rl.get_screen_width() as f32 / width as f32;
         let mut d = rl.begin_drawing(&thread);
+        unsafe {
+            rlViewport(0, 0, width as i32, height as i32);
+        }
         let mut mode2d = d.begin_mode2D(rl_camera);
         if enable_spotlight {
             mode2d.clear_background(SPOTLIGHT_TINT);
             let mouse_position = mode2d.get_mouse_position();
+            let framebuffer_scale = 1.0 / texture_scale;
             spotlight_shader.set_shader_value(
                 spotlight_tint_uniform_location,
                 SPOTLIGHT_TINT.color_normalize(),
@@ -219,18 +235,33 @@ fn main() {
             let screen_height = mode2d.get_screen_height().as_f32();
             spotlight_shader.set_shader_value(
                 cursor_position_uniform_location,
-                Vector2::new(mouse_position.x, screen_height - mouse_position.y),
+                Vector2::new(
+                    mouse_position.x * framebuffer_scale,
+                    (screen_height - mouse_position.y) * framebuffer_scale,
+                ),
             );
             spotlight_shader.set_shader_value(
                 spotlight_radius_multiplier_uniform_location,
-                spotlight_radius_multiplier,
+                spotlight_radius_multiplier * framebuffer_scale,
             );
 
             let mut shader_mode = mode2d.begin_shader_mode(&mut spotlight_shader);
-            shader_mode.draw_texture(&screenshot_texture, 0, 0, Color::WHITE);
+            shader_mode.draw_texture_ex(
+                &screenshot_texture,
+                Vector2::zero(),
+                0.0,
+                texture_scale,
+                Color::WHITE,
+            );
         } else {
             mode2d.clear_background(Color::get_color(0));
-            mode2d.draw_texture(&screenshot_texture, 0, 0, Color::WHITE);
+            mode2d.draw_texture_ex(
+                &screenshot_texture,
+                Vector2::zero(),
+                0.0,
+                texture_scale,
+                Color::WHITE,
+            );
         }
     }
 }
@@ -248,4 +279,27 @@ OPTIONS:
         bin = bin
     );
     process::exit(0);
+}
+
+// OutputInfo { name: String, logical_region: LogicalRegion, .. }
+// LogicalRegion { inner: Region { position: Position{x,y}, size: Size{width,height} } }
+fn output_at(outputs: &[OutputInfo], x: i32, y: i32) -> Option<&OutputInfo> {
+    outputs.iter().find(|o| {
+        let r = &o.logical_region.inner;
+        x >= r.position.x
+            && y >= r.position.y
+            && x < r.position.x + r.size.width as i32
+            && y < r.position.y + r.size.height as i32
+    })
+}
+
+fn cursor_pos() -> Option<(i32, i32)> {
+    // Hyprland: prints "1234, 567"
+    let out = process::Command::new("hyprctl")
+        .arg("cursorpos")
+        .output()
+        .ok()?;
+    let s = String::from_utf8(out.stdout).ok()?;
+    let (a, b) = s.trim().split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
